@@ -1,0 +1,9 @@
+[package]
+name = "linfa-bayesian-ridge"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+linfa = { version = "0.8.1", path = "../.." }
+ndarray = {version = "0.16", default-features = false}
+ndarray-linalg = {version = "0.17", default-features = false}
