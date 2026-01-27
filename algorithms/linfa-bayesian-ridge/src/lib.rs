@@ -9,7 +9,6 @@ pub mod posterior;
 pub mod error;
 
 pub use ridge::BayesianRidge;
-pub use ard::ARDRegression;
 pub use posterior::BayesianPosterior;
 pub use error::BayesianError;
 
