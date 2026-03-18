@@ -21,6 +21,8 @@ pub enum PreprocessingError {
     InvalidNGramBoundaries(usize, usize),
     #[error("n_gram min boundary cannot be greater than max boundary (min = {0}, max = {1})")]
     FlippedNGramBoundaries(usize, usize),
+    #[error("lower quantile is greater than or equal to upper quantile")]
+    InvalidQuantileRange,
     #[error("document frequencies have to be between 0 and 1 (min = {0}, max = {1})")]
     InvalidDocumentFrequencies(f32, f32),
     #[error("min document frequency cannot be greater than max document frequency (min = {0}, max = {1})")]

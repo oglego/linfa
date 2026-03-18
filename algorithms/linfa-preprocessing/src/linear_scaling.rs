@@ -24,10 +24,12 @@ use serde_crate::{Deserialize, Serialize};
 /// * Standard (with mean, with std): subtracts the mean to each feature and scales it by the inverse of its standard deviation
 /// * MinMax (min, max): scales each feature to fit in the range `min..=max`, default values are `0..=1`
 /// * MaxAbs: scales each feature by the inverse of its maximum absolute value, so that it fits the range `-1..=1`
+/// * Robust (lower, upper): subtracts the median from each feature and scales it according to the quantile range specified by `lower` and `upper`
 pub enum ScalingMethod<F: Float> {
     Standard(bool, bool),
     MinMax(F, F),
     MaxAbs,
+    Robust(F, F),
 }
 
 impl<F: Float> ScalingMethod<F> {
@@ -39,6 +41,7 @@ impl<F: Float> ScalingMethod<F> {
             ScalingMethod::Standard(a, b) => Self::standardize(records, *a, *b),
             ScalingMethod::MinMax(a, b) => Self::min_max(records, *a, *b),
             ScalingMethod::MaxAbs => Self::max_abs(records),
+            ScalingMethod::Robust(a, b) => Self::robust(records, *a, *b),
         }
     }
 
@@ -129,6 +132,61 @@ impl<F: Float> ScalingMethod<F> {
             method: ScalingMethod::MaxAbs,
         })
     }
+
+    fn robust<D: Data<Elem = F>>(
+        records: &ArrayBase<D, Ix2>,
+        lower: F,
+        upper: F,
+    ) -> Result<LinearScaler<F>> {
+        if records.dim().0 == 0 {
+            return Err(PreprocessingError::NotEnoughSamples);
+        } else if lower >= upper {
+            return Err(PreprocessingError::InvalidQuantileRange);
+        }
+
+        let n_samples = records.dim().0;
+        let n_features = records.dim().1;
+
+        // Use a single map_axis to calculate both offsets and scales in one sort pass
+        let mut offsets = Array1::zeros(n_features);
+        let mut scales = Array1::zeros(n_features);
+
+        let params: Vec<(F, F)> = records
+            .map_axis(Axis(0), |col| {
+                let mut v = col.to_vec();
+                v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+                // Median (Offset)
+                let median = v[n_samples / 2];
+
+                // Quantile indices using generic float traits
+                let n_f = F::cast(n_samples - 1);
+                let low_idx = (n_f * lower).round().to_usize().unwrap_or(0);
+                let upp_idx = (n_f * upper).round().to_usize().unwrap_or(n_samples - 1);
+
+                let iqr = v[upp_idx] - v[low_idx];
+                let scale = if abs_diff_eq!(iqr, F::zero()) {
+                    F::one()
+                } else {
+                    F::one() / iqr
+                };
+
+                (median, scale)
+            })
+            .to_vec();
+
+        // Distribute the results into the arrays
+        for (i, (offset, scale)) in params.into_iter().enumerate() {
+            offsets[i] = offset;
+            scales[i] = scale;
+        }
+
+        Ok(LinearScaler {
+            offsets,
+            scales,
+            method: ScalingMethod::Robust(lower, upper),
+        })
+    }
 }
 
 impl<F: Float> std::fmt::Display for ScalingMethod<F> {
@@ -142,6 +200,10 @@ impl<F: Float> std::fmt::Display for ScalingMethod<F> {
                 write!(f, "Min-Max scaler (min = {min}, max = {max})")
             }
             ScalingMethod::MaxAbs => write!(f, "MaxAbs scaler"),
+            ScalingMethod::Robust(lower, upper) => write!(
+                f,
+                "Robust scaler (lower quantile = {lower}, upper quantile = {upper})"
+            ),
         }
     }
 }
@@ -228,6 +290,22 @@ impl<F: Float> LinearScaler<F> {
     pub fn max_abs() -> LinearScalerParams<F> {
         LinearScalerParams {
             method: ScalingMethod::MaxAbs,
+        }
+    }
+
+    /// Initializes a Robust scaler with default quantiles `0.25` and `0.75`
+    pub fn robust() -> LinearScalerParams<F> {
+        LinearScalerParams {
+            method: ScalingMethod::Robust(F::cast(0.25), F::cast(0.75)),
+        }
+    }
+
+    /// Initializes a Robust scaler with the specified quantile range.
+    ///
+    /// If `lower` is greater than or equal to `upper`, fitting will return an error on any input.
+    pub fn robust_with_quantiles(lower: F, upper: F) -> LinearScalerParams<F> {
+        LinearScalerParams {
+            method: ScalingMethod::Robust(lower, upper),
         }
     }
 }
@@ -519,6 +597,130 @@ mod tests {
         // 0 max for constant feature
         assert_abs_diff_eq!(maxes, array![1., 1., 0.]);
         assert_abs_diff_eq!(mins, array![0., 0., 0.]);
+    }
+
+    #[test]
+    fn test_robust_scaler_comparison() {
+        // Data with a heavy-tail outlier
+        let records = array![
+            [1.0],
+            [1.1],
+            [1.2],
+            [1.3],
+            [1.4],
+            [1.5],
+            [1.6],
+            [1.7],
+            [1.8],
+            [1000000.0]
+        ];
+        let dataset = DatasetBase::from(records);
+
+        let robust_scaler = LinearScaler::robust().fit(&dataset).unwrap();
+        let transformed = robust_scaler.transform(dataset);
+
+        // With 10 samples, the median (index 5) should be 1.5
+        assert_abs_diff_eq!(robust_scaler.offsets()[0], 1.5);
+
+        // Check that the normal values are still "readable" and not squashed to zero
+        // In a standard scaler, these would be ~0.000001 apart.
+        // In robust, they should be approximately 0.1 / IQR apart.
+        let val_1: f64 = transformed.records()[[0, 0]];
+        let val_2: f64 = transformed.records()[[1, 0]];
+        assert!((val_2 - val_1).abs() > 0.1);
+    }
+
+    #[test]
+    fn test_robust_scaler_outliers() {
+        // Feature 0: standard points [1, 2, 3] with one massive outlier [1000]
+        // Feature 1: reversed points with a negative outlier
+        let dataset = array![[1., 10.], [2., 9.], [3., 8.], [1000., -1000.]].into();
+        let scaler = LinearScaler::robust().fit(&dataset).unwrap();
+
+        // With 4 samples, n/2 = index 2.
+        // Sorted col 0: [1, 2, 3, 1000] -> index 2 is 3.0
+        // Sorted col 1: [-1000, 8, 9, 10] -> index 2 is 9.0
+        assert_abs_diff_eq!(*scaler.offsets(), array![3.0, 9.0]);
+
+        // IQR indices for n=4:
+        // lower (0.25 * 3) = 0.75 -> round to 1.
+        // upper (0.75 * 3) = 2.25 -> round to 2.
+        // Col 0: v[2] - v[1] = 3.0 - 2.0 = 1.0. Scale = 1/1 = 1.0
+        // Col 1: v[2] - v[1] = 9.0 - 8.0 = 1.0. Scale = 1/1 = 1.0
+        assert_abs_diff_eq!(*scaler.scales(), array![1.0, 1.0]);
+
+        let transformed = scaler.transform(dataset);
+        // The median point [3, 8] should be centered and scaled
+        // For col 0: (2.0 - 3.0) * 1.0 = -1.0
+        assert_abs_diff_eq!(transformed.records()[[1, 0]], -1.0);
+        // Outlier is scaled but doesn't crush the other values
+        assert_abs_diff_eq!(transformed.records()[[3, 0]], 997.0);
+    }
+
+    #[test]
+    fn test_robust_custom_quantiles() {
+        let dataset = array![[0.], [2.], [4.], [6.], [10.]].into();
+        // Using 0.0 and 1.0 as quantiles makes it scale by the full range (Min/Max)
+        // while still using the median as the offset.
+        let scaler = LinearScaler::robust_with_quantiles(0.0, 1.0)
+            .fit(&dataset)
+            .unwrap();
+
+        // Median of [0, 2, 4, 6, 10] is 4.0
+        assert_abs_diff_eq!(scaler.offsets()[0], 4.0);
+        // Range is 10 - 0 = 10. Scale is 1/10 = 0.1
+        assert_abs_diff_eq!(scaler.scales()[0], 0.1);
+
+        let transformed = scaler.transform(dataset);
+        assert_abs_diff_eq!(transformed.records()[[4, 0]], 0.6); // (10-4)*0.1
+    }
+
+    #[test]
+    fn test_robust_const_feature() {
+        // A feature that never changes has an IQR of 0
+        let dataset = array![[5., 0.], [5., 0.], [5., 0.]].into();
+        let scaler = LinearScaler::robust().fit(&dataset).unwrap();
+
+        // Scale should default to 1.0 for constant features to avoid div by zero
+        assert_abs_diff_eq!(scaler.scales()[0], 1.0);
+        assert_abs_diff_eq!(scaler.scales()[1], 1.0);
+
+        let transformed = scaler.transform(dataset);
+        // All values become 0.0 because (5.0 - 5.0) * 1.0 = 0
+        assert_abs_diff_eq!(transformed.records()[[0, 0]], 0.0);
+        assert_abs_diff_eq!(transformed.records()[[0, 1]], 0.0);
+    }
+
+    #[test]
+    fn test_robust_display() {
+        let method: ScalingMethod<f64> = ScalingMethod::Robust(0.25, 0.75);
+        let display_str = format!("{}", method);
+        assert!(display_str.contains("Robust scaler"));
+        assert!(display_str.contains("0.25"));
+        assert!(display_str.contains("0.75"));
+    }
+
+    #[test]
+    fn test_robust_empty_input() {
+        let dataset: DatasetBase<Array2<f64>, _> =
+            Array2::from_shape_vec((0, 0), vec![]).unwrap().into();
+        let scaler = LinearScaler::robust().fit(&dataset);
+        assert_eq!(
+            scaler.err().unwrap().to_string(),
+            "not enough samples".to_string()
+        );
+    }
+
+    #[test]
+    fn test_robust_scaler_flipped_range() {
+        let dataset = array![[1.], [2.], [3.]].into();
+        let scaler = LinearScaler::robust_with_quantiles(0.8, 0.2).fit(&dataset);
+
+        // Check for the specific new error
+        assert_eq!(
+            scaler.err().unwrap(),
+            Err(PreprocessingError::InvalidQuantileRange)
+        );
     }
 
     #[test]
