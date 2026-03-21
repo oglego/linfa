@@ -2,6 +2,7 @@
 
 mod base_nb;
 mod bernoulli_nb;
+mod complement_nb;
 mod error;
 mod gaussian_nb;
 mod hyperparams;
@@ -12,6 +13,7 @@ pub use bernoulli_nb::BernoulliNb;
 pub use error::{NaiveBayesError, Result};
 pub use gaussian_nb::GaussianNb;
 pub use hyperparams::{BernoulliNbParams, BernoulliNbValidParams};
+pub use hyperparams::{ComplementNbParams, ComplementNbValidParams};
 pub use hyperparams::{GaussianNbParams, GaussianNbValidParams};
 pub use hyperparams::{MultinomialNbParams, MultinomialNbValidParams};
 pub use multinomial_nb::MultinomialNb;

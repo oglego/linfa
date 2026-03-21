@@ -289,3 +289,95 @@ impl<F: Float, L> ParamGuard for BernoulliNbParams<F, L> {
         Ok(self.0)
     }
 }
+
+/// A verified hyper-parameter set ready for the estimation of a [Complement Naive Bayes model](crate::Complement_nb::ComplementNb).
+///
+/// See [`ComplementNb`](crate::Complement_nb::ComplementNb) for information on the model and [`ComplementNbParams`](crate::hyperparams::ComplementNbParams) for information on hyperparameters.
+#[cfg_attr(
+    feature = "serde",
+    derive(Serialize, Deserialize),
+    serde(crate = "serde_crate")
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComplementNbValidParams<F, L> {
+    // Required for calculation stability
+    alpha: F,
+    // Phantom data for label type
+    label: PhantomData<L>,
+}
+
+impl<F: Float, L> ComplementNbValidParams<F, L> {
+    /// Get the variance smoothing
+    pub fn alpha(&self) -> F {
+        self.alpha
+    }
+}
+
+/// A hyper-parameter set during construction for a [Complement Naive Bayes model](crate::Complement_nb::ComplementNb).
+///
+/// The parameter set can be verified into a
+/// [`ComplementNbValidParams`](crate::hyperparams::ComplementNbValidParams) by calling
+/// [ParamGuard::check](Self::check). It is also possible to directly fit a model with
+/// [Fit::fit](linfa::traits::Fit::fit) or
+/// [FitWith::fit_with](linfa::traits::FitWith::fit_with) which implicitely verifies the parameter set
+/// prior to the model estimation and forwards any error.
+///
+/// See [`ComplementNb`](crate::Complement_nb::ComplementNb) for information on the model.
+///
+/// # Parameters
+/// | Name | Default | Purpose | Range |
+/// | :--- | :--- | :---| :--- |
+/// | [alpha](Self::alpha) | `1` | Additive (Laplace/Lidstone) smoothing parameter (0 for no smoothing) | `[0, inf)` |
+///
+/// # Errors
+///
+/// The following errors can come from invalid hyper-parameters:
+///
+/// Returns [`InvalidSmoothing`](NaiveBayesError::InvalidSmoothing) if the smoothing
+/// parameter is negative.
+///
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComplementNbParams<F, L>(ComplementNbValidParams<F, L>);
+
+impl<F: Float, L> Default for ComplementNbParams<F, L> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<F: Float, L> ComplementNbParams<F, L> {
+    /// Create new [ComplementNbParams] set with default values for its parameters
+    pub fn new() -> Self {
+        Self(ComplementNbValidParams {
+            alpha: F::cast(1),
+            label: PhantomData,
+        })
+    }
+
+    /// Specifies the portion of the largest variance of all the features that
+    /// is added to the variance for calculation stability
+    pub fn alpha(mut self, alpha: F) -> Self {
+        self.0.alpha = alpha;
+        self
+    }
+}
+
+impl<F: Float, L> ParamGuard for ComplementNbParams<F, L> {
+    type Checked = ComplementNbValidParams<F, L>;
+    type Error = NaiveBayesError;
+
+    fn check_ref(&self) -> Result<&Self::Checked, Self::Error> {
+        if self.0.alpha.is_negative() {
+            Err(NaiveBayesError::InvalidSmoothing(
+                self.0.alpha.to_f64().unwrap(),
+            ))
+        } else {
+            Ok(&self.0)
+        }
+    }
+
+    fn check(self) -> Result<Self::Checked, Self::Error> {
+        self.check_ref()?;
+        Ok(self.0)
+    }
+}
