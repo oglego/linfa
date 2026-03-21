@@ -17,6 +17,8 @@ pub enum PreprocessingError {
     TokenizerNotSet,
     #[error("minimum value for MinMax scaler cannot be greater than the maximum")]
     FlippedMinMaxRange,
+    #[error("minimum value for Robust scaler cannot be greater than the maximum")]
+    FlippedRobustRange,
     #[error("n_gram boundaries cannot be zero (min = {0}, max = {1})")]
     InvalidNGramBoundaries(usize, usize),
     #[error("n_gram min boundary cannot be greater than max boundary (min = {0}, max = {1})")]
